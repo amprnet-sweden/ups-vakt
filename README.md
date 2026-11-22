@@ -7,6 +7,31 @@ Tested 2026-11-18 on Raspberry Pi with Debian 13 (zabbix-agent 8.0) and Raspberr
 (Debian's zabbix-agent), with APC Back-UPS and HP T750.
 A second run changes nothing (changed=0).
 
+## Prerequisites
+
+**Ansible** is a tool that configures other machines over SSH from your own computer. You run
+the playbook on your computer, and Ansible logs in to each Pi and makes the changes there.
+Nothing needs to be installed on the Pis beforehand (Python 3 is already part of Raspberry Pi OS).
+
+On your computer (Linux, macOS, or WSL on Windows), install Ansible 2.14 or newer
+(tested with ansible-core 2.20):
+
+```bash
+sudo apt install ansible           # Debian, Ubuntu, Raspberry Pi OS, WSL
+brew install ansible               # macOS
+pipx install --include-deps ansible  # any system with pipx
+```
+
+Check the installation with `ansible --version`.
+
+On each Pi:
+
+- the UPS is connected via USB,
+- you can log in with an SSH key, and your user has sudo rights.
+
+In Zabbix, the template **"nut_ups template"** must be imported (see [In Zabbix](#in-zabbix)),
+and the Zabbix server must be able to reach the agent on the Pi on port 10050.
+
 ## What the playbook does
 
 1. Installs `nut-server`, `nut-client` and `zabbix-agent`.
