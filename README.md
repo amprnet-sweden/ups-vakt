@@ -1,0 +1,77 @@
+# UPS via NUT to Zabbix (Ansible)
+
+Sets up a USB-connected UPS on a Raspberry Pi with NUT (Network UPS Tools) and makes it
+visible in Zabbix through the template **"nut_ups template"** (agent key `upsmon[...]`).
+
+Tested 2026-11-18 on Raspberry Pi with Debian 13 (zabbix-agent 8.0) and Raspberry Pi OS / Debian 12
+(Debian's zabbix-agent), with APC Back-UPS and HP T750.
+A second run changes nothing (changed=0).
+
+## What the playbook does
+
+1. Installs `nut-server`, `nut-client` and `zabbix-agent`.
+2. **NUT** (unless `nut_manage` is `false`): **standalone** mode, the UPS in `/etc/nut/ups.conf`
+   (driver `usbhid-ups`, UPS name = the Pi's short host name) and NUT's USB rule
+   (`udevadm trigger`), so the driver can open a UPS that was plugged in before NUT was installed.
+3. **upsmon** (always with `nut_manage`, otherwise if `nut_upsmon=true`): an internal NUT user
+   with a random password and a MONITOR line, so the Pi **shuts down cleanly on low battery**.
+4. **Zabbix agent**: `/etc/zabbix/scripts/upsmon.sh` and `UserParameter=upsmon[*]` in the
+   agent's include directory (found automatically), and `Server=` if `zabbix_server` is set.
+5. Finally checks that NUT responds and that the agent answers the same questions Zabbix asks.
+
+## Usage
+
+```bash
+eval "$(ssh-agent -s)" && ssh-add          # once per terminal window
+cp inventory.example.ini inventory.ini     # first time, fill in your Pis
+ansible-playbook -i inventory.ini ups.yml -K -l <host> --check --diff   # dry run
+ansible-playbook -i inventory.ini ups.yml -K -l <host>                  # for real
+```
+
+`-K` asks for the sudo password on the target Pi. Run one Pi at a time if the passwords differ.
+A dry run on a brand-new Pi stops after the install step (the configuration files don't exist
+until the packages are installed) and says so.
+
+## Per-host variables (inventory.ini)
+
+| Variable | Meaning |
+|---|---|
+| `zabbix_server` | The Zabbix server allowed to query the agent (sets `Server=`) |
+| `ups_name` | UPS name in NUT and Zabbix (default: the Pi's short host name) |
+| `nut_vendorid`, `nut_productid`, `nut_desc` | USB IDs and description (optional, from `lsusb`) |
+| `nut_manage=false` | Leave an existing NUT setup alone, only add the Zabbix part. `ups_name` must then match the section in `ups.conf`. |
+| `nut_upsmon=true` | With `nut_manage=false`: still add upsmon (clean shutdown) |
+
+## In Zabbix
+
+Add the host with an **Agent** interface (the Pi's IP, port 10050) and the templates
+**"nut_ups template"** and **"Linux by Zabbix agent"** (the passive one, not "active").
+
+| Key | Content |
+|---|---|
+| `upsmon[ups.discovery]` | list of UPSes (`{#UPSNAME}`) |
+| `upsmon[<ups>,ups.status]` | status as a number: 1 on line, 2 on battery, 3 low battery, 13 on line and charging, 14 on battery and discharging … (value map "UPS Battery Status") |
+| `upsmon[<ups>,battery.charge]` etc. | the value straight from `upsc` |
+
+Values the UPS model doesn't report show up as "Not supported" in Zabbix. That is normal.
+
+## Troubleshooting
+
+- `upsc <ups>@localhost` says **"Driver not connected"**: check
+  `journalctl -u 'nut-driver@*'`. Run the driver by hand with `-DD`
+  (`/lib/nut/usbhid-ups -a <ups> -u nut -DD`). The message "insufficient permissions on everything"
+  can be misleading: if it says "failed match of VendorID", the `vendorid`/`productid` in
+  `ups.conf` don't match the UPS (e.g. after the UPS was replaced).
+- `zabbix_agentd` is in `/usr/sbin` and not in an ordinary user's PATH on Debian 12.
+
+## Files
+
+- `ups.yml`: the playbook
+- `inventory.example.ini`: example, copy it to `inventory.ini`
+- `files/upsmon.sh`: the agent script
+- `credentials/<host>/upsmon`: the random NUT password per host. Created automatically and
+  must not be committed or shared (listed in `.gitignore`, as is `inventory.ini`).
+
+## License
+
+GNU General Public License v3.0, see `LICENSE`.

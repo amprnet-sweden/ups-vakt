@@ -1,0 +1,199 @@
+# Sets up a USB UPS on a Raspberry Pi with NUT and makes it visible to Zabbix
+# through the "nut_ups template" (agent key upsmon[...]).
+#
+# Run from the PC:
+#   ansible-playbook -i inventory.ini ups.yml -K            (all hosts)
+#   ansible-playbook -i inventory.ini ups.yml -K -l pi1      (one host)
+#   add --check --diff to see what would change without changing anything
+#
+# Per-host variables (inventory.ini):
+#   ups_name        UPS name in NUT and Zabbix (default: short host name)
+#   nut_vendorid    USB vendor id, e.g. 051D for APC   (optional, from nut-scanner -U)
+#   nut_productid   USB product id, e.g. 0002          (optional)
+#   nut_desc        free text description              (optional)
+#   zabbix_server   if set, the agent's Server= line is set to this address
+#   nut_manage      false = leave an existing NUT setup alone, only add the Zabbix part
+#                   (then ups_name must match the existing [section] in ups.conf)
+#   nut_upsmon      true = with nut_manage=false, still add upsmon (clean shutdown on low battery)
+#
+# The upsmon password is generated once per host on the PC and kept in
+# credentials/<host>/upsmon (never shown, never committed).
+
+- name: UPS via NUT for Zabbix
+  hosts: ups_pis
+  become: true
+
+  vars:
+    # Defaults are applied with default() so that host variables in the inventory win
+    # (play vars would otherwise override inventory host vars).
+    upsname: "{{ ups_name | default(inventory_hostname.split('.')[0]) }}"
+    upsmon_password: "{{ lookup('ansible.builtin.password', 'credentials/' ~ inventory_hostname ~ '/upsmon', chars=['hexdigits'], length=32) | lower }}"
+    agent_conf: /etc/zabbix/zabbix_agentd.conf
+    agent_service: zabbix-agent
+    manage_nut: "{{ nut_manage | default(true) | bool }}"
+    add_upsmon: "{{ nut_upsmon | default(false) | bool }}"
+
+  tasks:
+    # ---------- NUT ----------
+    - name: Install NUT and the Zabbix agent
+      ansible.builtin.apt:
+        name: [nut-server, nut-client, zabbix-agent]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      register: packages
+
+    - name: Dry run on a fresh host stops here (the config files only exist after installing)
+      ansible.builtin.debug:
+        msg: "--check: NUT/agent are not installed yet, so the remaining tasks can't be previewed. Run without --check."
+      when: ansible_check_mode and packages.changed
+
+    - name: End dry run for this host
+      ansible.builtin.meta: end_host
+      when: ansible_check_mode and packages.changed
+
+    - name: Configure NUT (skipped when nut_manage=false, i.e. NUT was set up by hand)
+      when: manage_nut | bool
+      block:
+        - name: NUT runs standalone (UPS and monitoring on this machine)
+          ansible.builtin.lineinfile:
+            path: /etc/nut/nut.conf
+            regexp: '^MODE='
+            line: MODE=standalone
+          notify: Restart NUT
+
+        - name: Describe the UPS in ups.conf
+          ansible.builtin.blockinfile:
+            path: /etc/nut/ups.conf
+            marker: "# {mark} ANSIBLE MANAGED UPS"
+            block: |
+              [{{ upsname }}]
+                driver = usbhid-ups
+                port = auto
+              {% if nut_vendorid is defined %}
+                vendorid = {{ nut_vendorid }}
+              {% endif %}
+              {% if nut_productid is defined %}
+                productid = {{ nut_productid }}
+              {% endif %}
+              {% if nut_desc is defined %}
+                desc = "{{ nut_desc }}"
+              {% endif %}
+          notify: Restart NUT
+
+        - name: Apply NUT's USB permission rule to a UPS that was plugged in before NUT
+          ansible.builtin.command: udevadm trigger --subsystem-match=usb --action=add
+          changed_when: false
+
+    - name: Clean shutdown via upsmon (always with nut_manage; with nut_manage=false only if nut_upsmon=true)
+      when: (manage_nut | bool) or (add_upsmon | bool)
+      block:
+        - name: Internal NUT user for the monitor
+          ansible.builtin.blockinfile:
+            path: /etc/nut/upsd.users
+            marker: "# {mark} ANSIBLE MANAGED UPSMON USER"
+            block: |
+              [upsmon]
+                password = {{ upsmon_password }}
+                upsmon primary
+          no_log: true
+          notify: Restart NUT
+
+        - name: Monitor the UPS (shuts the Pi down cleanly on low battery)
+          ansible.builtin.lineinfile:
+            path: /etc/nut/upsmon.conf
+            regexp: '^MONITOR '
+            line: "MONITOR {{ upsname }}@localhost 1 upsmon {{ upsmon_password }} primary"
+          no_log: true
+          notify: Restart NUT
+
+        - name: NUT server and monitor enabled and running
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+            enabled: true
+            state: started
+          loop: [nut-server.service, nut-monitor.service]
+
+    # ---------- Zabbix agent ----------
+    - name: Find the agent's include folder
+      ansible.builtin.shell: "awk -F= '/^Include=/{print $2; exit}' {{ agent_conf }}"
+      register: agent_include
+      changed_when: false
+      check_mode: false   # read-only, also run in --check
+
+    - name: Fail if the agent has no Include line
+      ansible.builtin.assert:
+        that: agent_include.stdout | length > 0
+        fail_msg: "No Include= line in {{ agent_conf }}"
+
+    - name: Script folder
+      ansible.builtin.file:
+        path: /etc/zabbix/scripts
+        state: directory
+        mode: "0755"
+
+    - name: UPS script for the agent
+      ansible.builtin.copy:
+        src: files/upsmon.sh
+        dest: /etc/zabbix/scripts/upsmon.sh
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Agent key upsmon[...]
+      ansible.builtin.copy:
+        dest: "{{ agent_include.stdout | dirname }}/upsmon.conf"
+        content: |
+          # Managed by Ansible (ups.yml)
+          UserParameter=upsmon[*],/etc/zabbix/scripts/upsmon.sh "$1" "$2"
+        mode: "0644"
+      notify: Restart Zabbix agent
+
+    - name: Agent answers the Zabbix server
+      ansible.builtin.lineinfile:
+        path: "{{ agent_conf }}"
+        regexp: '^Server='
+        line: "Server={{ zabbix_server }}"
+      when: zabbix_server is defined
+      notify: Restart Zabbix agent
+
+  handlers:
+    - name: Restart NUT
+      when: (manage_nut | bool) or (add_upsmon | bool)
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - nut-driver-enumerator.service
+        - nut-server.service
+        - nut-monitor.service
+
+    - name: Restart Zabbix agent
+      ansible.builtin.systemd_service:
+        name: "{{ agent_service }}"
+        state: restarted
+
+  post_tasks:
+    - name: Wait for the UPS driver
+      ansible.builtin.command: "upsc {{ upsname }}@localhost ups.status"
+      register: ups_status
+      retries: 6
+      delay: 10
+      until: ups_status.rc == 0
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Ask the agent the same questions Zabbix will ask
+      ansible.builtin.command: "/usr/sbin/zabbix_agentd -t {{ item }}"
+      loop:
+        - "upsmon[ups.discovery]"
+        - "upsmon[{{ upsname }},ups.status]"
+        - "upsmon[{{ upsname }},battery.charge]"
+      register: agent_test
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Show the answers
+      ansible.builtin.debug:
+        msg: "{{ agent_test.results | map(attribute='stdout') | list }}"
+      when: not ansible_check_mode
