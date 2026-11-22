@@ -44,6 +44,12 @@ until the packages are installed) and says so.
 
 ## In Zabbix
 
+The template **"nut_ups template"** comes from
+[delin/Zabbix-NUT-Template](https://github.com/delin/Zabbix-NUT-Template) (Apache-2.0).
+For Zabbix 7.0 LTS and later, import `nut_ups_template_zb-6.4_.xml` from that repository.
+This playbook installs its own agent script (`files/upsmon.sh`), which answers the same
+`upsmon[...]` keys, so the template works unchanged.
+
 Add the host with an **Agent** interface (the Pi's IP, port 10050) and the templates
 **"nut_ups template"** and **"Linux by Zabbix agent"** (the passive one, not "active").
 
