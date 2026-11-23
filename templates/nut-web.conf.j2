@@ -1,0 +1,18 @@
+# Managed by Ansible (ups.yml): NUT's read-only status page.
+# Everything except the status page (and its graphs) gets 403, including upsset.cgi.
+
+url.redirect = ( "^/$" => "/cgi-bin/nut/upsstats.cgi" )
+
+$HTTP["url"] !~ "^/(cgi-bin/nut/ups(stats|image)\.cgi)?$" {
+  url.access-deny = ( "" )
+}
+
+# Allowed networks: localhost, {{ web_allow | join(', ') }}
+{% set nets = ['127.0.0.0/8', '::1/128'] + web_allow %}
+{% for net in nets %}
+{{ '  ' * loop.index0 }}$HTTP["remoteip"] != "{{ net | trim }}" {
+{% endfor %}
+{{ '  ' * (nets | length) }}url.access-deny = ( "" )
+{% for net in nets %}
+{{ '  ' * loop.revindex0 }}{{ '}' }}
+{% endfor %}

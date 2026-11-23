@@ -15,6 +15,10 @@
 #   nut_manage      false = leave an existing NUT setup alone, only add the Zabbix part
 #                   (then ups_name must match the existing [section] in ups.conf)
 #   nut_upsmon      true = with nut_manage=false, still add upsmon (clean shutdown on low battery)
+#   nut_web         true = also serve NUT's read-only status page (nut-cgi + lighttpd)
+#   nut_web_port    port for the status page (default 8088)
+#   nut_web_allow   comma-separated networks allowed to see the page
+#                   (default 44.0.0.0/9,44.128.0.0/10,10.0.0.0/8; localhost is always allowed)
 #
 # The upsmon password is generated once per host on the PC and kept in
 # credentials/<host>/upsmon (never shown, never committed).
@@ -32,6 +36,9 @@
     agent_service: zabbix-agent
     manage_nut: "{{ nut_manage | default(true) | bool }}"
     add_upsmon: "{{ nut_upsmon | default(false) | bool }}"
+    web_enabled: "{{ nut_web | default(false) | bool }}"
+    web_port: "{{ nut_web_port | default(8088) }}"
+    web_allow: "{{ (nut_web_allow | default('44.0.0.0/9,44.128.0.0/10,10.0.0.0/8')).split(',') }}"
 
   tasks:
     # ---------- NUT ----------
@@ -157,6 +164,56 @@
       when: zabbix_server is defined
       notify: Restart Zabbix agent
 
+    # ---------- Optional web status page ----------
+    - name: NUT status page in a browser (only with nut_web=true)
+      when: web_enabled | bool
+      block:
+        - name: Install nut-cgi and lighttpd
+          ansible.builtin.apt:
+            name: [nut-cgi, lighttpd]
+            state: present
+          register: web_packages
+
+        - name: Configure the web server (skipped in --check before the packages exist)
+          when: not (ansible_check_mode and web_packages.changed)
+          block:
+            - name: lighttpd listens on the status page port
+              ansible.builtin.lineinfile:
+                path: /etc/lighttpd/lighttpd.conf
+                regexp: '^server\.port\s*='
+                line: "server.port = {{ web_port }}"
+              notify: Restart lighttpd
+
+            - name: lighttpd may run CGI programs from /usr/lib/cgi-bin
+              ansible.builtin.command: lighty-enable-mod cgi
+              args:
+                creates: /etc/lighttpd/conf-enabled/10-cgi.conf
+              notify: Restart lighttpd
+
+            - name: Only the status page, only from the allowed networks
+              ansible.builtin.template:
+                src: templates/nut-web.conf.j2
+                dest: /etc/lighttpd/conf-enabled/90-nut-web.conf
+                mode: "0644"
+              notify: Restart lighttpd
+
+            - name: The status page shows this UPS
+              ansible.builtin.blockinfile:
+                path: /etc/nut/hosts.conf
+                marker: "# {mark} ANSIBLE MANAGED UPS"
+                block: |
+                  MONITOR {{ upsname }}@localhost "{{ nut_desc | default(upsname) }}"
+
+            - name: Check the lighttpd configuration
+              ansible.builtin.command: lighttpd -tt -f /etc/lighttpd/lighttpd.conf
+              changed_when: false
+
+            - name: lighttpd enabled and running
+              ansible.builtin.systemd_service:
+                name: lighttpd.service
+                enabled: true
+                state: started
+
   handlers:
     - name: Restart NUT
       when: (manage_nut | bool) or (add_upsmon | bool)
@@ -171,6 +228,11 @@
     - name: Restart Zabbix agent
       ansible.builtin.systemd_service:
         name: "{{ agent_service }}"
+        state: restarted
+
+    - name: Restart lighttpd
+      ansible.builtin.systemd_service:
+        name: lighttpd.service
         state: restarted
 
   post_tasks:
@@ -197,3 +259,19 @@
       ansible.builtin.debug:
         msg: "{{ agent_test.results | map(attribute='stdout') | list }}"
       when: not ansible_check_mode
+
+    - name: Fetch the status page
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ web_port }}/cgi-bin/nut/upsstats.cgi"
+        return_content: true
+      register: web_page
+      when: (web_enabled | bool) and not ansible_check_mode
+
+    - name: The status page shows the UPS
+      ansible.builtin.assert:
+        that: (nut_desc | default(upsname)) in web_page.content
+        fail_msg: >-
+          The page loads but doesn't show the UPS. Check that the web server user
+          can read /etc/nut/hosts.conf.
+        success_msg: "Status page OK: http://{{ inventory_hostname }}:{{ web_port }}/"
+      when: (web_enabled | bool) and not ansible_check_mode

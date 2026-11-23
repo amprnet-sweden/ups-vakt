@@ -5,7 +5,8 @@ visible in Zabbix through the template **"nut_ups template"** (agent key `upsmon
 
 Tested 2026-11-18 on Raspberry Pi with Debian 13 (zabbix-agent 8.0) and Raspberry Pi OS / Debian 12
 (Debian's zabbix-agent), with APC Back-UPS and HP T750.
-A second run changes nothing (changed=0).
+A second run changes nothing (changed=0). The optional status page (`nut_web`) was tested
+2026-11-23 on Debian 13, next to an existing Apache on ports 80/443.
 
 ## Prerequisites
 
@@ -42,7 +43,10 @@ and the Zabbix server must be able to reach the agent on the Pi on port 10050.
    with a random password and a MONITOR line, so the Pi **shuts down cleanly on low battery**.
 4. **Zabbix agent**: `/etc/zabbix/scripts/upsmon.sh` and `UserParameter=upsmon[*]` in the
    agent's include directory (found automatically), and `Server=` if `zabbix_server` is set.
-5. Finally checks that NUT responds and that the agent answers the same questions Zabbix asks.
+5. **Status page** (only if `nut_web=true`): NUT's read-only web page (`nut-cgi`) served by
+   `lighttpd` on port 8088, see [Status page](#status-page-optional).
+6. Finally checks that NUT responds, that the agent answers the same questions Zabbix asks,
+   and (with `nut_web`) that the status page shows the UPS.
 
 ## Usage
 
@@ -66,6 +70,26 @@ until the packages are installed) and says so.
 | `nut_vendorid`, `nut_productid`, `nut_desc` | USB IDs and description (optional, from `lsusb`) |
 | `nut_manage=false` | Leave an existing NUT setup alone, only add the Zabbix part. `ups_name` must then match the section in `ups.conf`. |
 | `nut_upsmon=true` | With `nut_manage=false`: still add upsmon (clean shutdown) |
+| `nut_web=true` | Also serve the read-only status page (default `false`) |
+| `nut_web_port` | Port for the status page (default `8088`) |
+| `nut_web_allow` | Comma-separated networks allowed to see the page (default `44.0.0.0/9,44.128.0.0/10,10.0.0.0/8`; localhost is always allowed) |
+
+## Status page (optional)
+
+With `nut_web=true` the Pi shows the UPS in a browser at `http://<pi>:8088/`
+(battery charge, load, runtime, status). The playbook:
+
+- installs `nut-cgi` and `lighttpd` and sets lighttpd's port to `nut_web_port`,
+- serves **only** the status page (`upsstats.cgi` and its graphs). Everything else, including
+  the settings page `upsset.cgi`, returns 403,
+- allows only localhost and the networks in `nut_web_allow`; other addresses get 403,
+- adds the UPS to `/etc/nut/hosts.conf`.
+
+The address restriction is a second layer. Also block the port in your firewall or routers
+for anyone who shouldn't see the page.
+
+Setting `nut_web=false` later does not remove anything. To remove the page, run
+`sudo apt purge nut-cgi lighttpd` on the Pi.
 
 ## In Zabbix
 
@@ -100,6 +124,7 @@ Values the UPS model doesn't report show up as "Not supported" in Zabbix. That i
 - `ups.yml`: the playbook
 - `inventory.example.ini`: example, copy it to `inventory.ini`
 - `files/upsmon.sh`: the agent script
+- `templates/nut-web.conf.j2`: lighttpd rules for the status page
 - `credentials/<host>/upsmon`: the random NUT password per host. Created automatically and
   must not be committed or shared (listed in `.gitignore`, as is `inventory.ini`).
 
