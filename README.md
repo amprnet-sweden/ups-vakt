@@ -1,4 +1,4 @@
-# UPS via NUT to Zabbix (Ansible)
+# UPS via NUT to Zabbix and/or local web (Ansible)
 
 Sets up a USB-connected UPS on a Raspberry Pi with NUT (Network UPS Tools) and makes it
 visible in Zabbix through the template **"nut_ups template"** (agent key `upsmon[...]`).
